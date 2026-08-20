@@ -3,7 +3,8 @@ use std::path::Path;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, Module32First, Module32Next, Process32First, Process32Next,
+    MODULEENTRY32, PROCESSENTRY32, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Memory::{
     VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
@@ -17,6 +18,10 @@ use super::{collect_db_salts, KeyEntry};
 const HEX_PATTERN_LEN: usize = 96;
 const CHUNK_SIZE: usize = 2 * 1024 * 1024;
 const CONFIG_CIPHER_NAME: &[u8] = b"com.Tencent.WCDB.Config.Cipher";
+// WeChat 4.1.12.55 `Weixin.dll` locations containing the XOR-mask data.
+const CONFIG_XOR_RVAS: [usize; 2] = [0x08b7_2f60, 0x08b7_3000];
+// The known 32-byte Config.Cipher XOR mask; it remains the fallback when a
+// future client moves the module-relative data locations.
 const CONFIG_XOR_MASK: [u8; 32] = [
     0xd2, 0xc7, 0x44, 0x24, 0x58, 0x02, 0x00, 0x00, 0x00, 0x48, 0x89, 0x44, 0x24, 0x50, 0x48, 0x8b,
     0x45, 0x00, 0x48, 0x84, 0x4c, 0x24, 0x48, 0x48, 0x89, 0x44, 0x25, 0x40, 0x48, 0x58, 0x4c, 0x24,
@@ -40,7 +45,7 @@ pub fn scan_keys(db_dir: &Path) -> Result<Vec<KeyEntry>> {
         };
         for pair in scan_memory(process)
             .into_iter()
-            .chain(scan_wcdb_config_keys(process))
+            .chain(scan_wcdb_config_keys(process, pid))
         {
             if !raw_keys.contains(&pair) {
                 raw_keys.push(pair);
@@ -136,8 +141,9 @@ fn is_wechat_executable(name: &str) -> bool {
 /// node, with the cipher value reachable from the node's config pointer. The
 /// value is XOR-obfuscated with a fixed mask and decodes to SQLCipher's raw
 /// `x'<key><salt>'` syntax.
-fn scan_wcdb_config_keys(process: HANDLE) -> Vec<(String, String)> {
+fn scan_wcdb_config_keys(process: HANDLE, pid: u32) -> Vec<(String, String)> {
     let mut results = Vec::new();
+    let masks = load_config_xor_masks(process, pid);
     let names = find_bytes(process, CONFIG_CIPHER_NAME);
     if names.is_empty() {
         return results;
@@ -177,17 +183,71 @@ fn scan_wcdb_config_keys(process: HANDLE) -> Vec<(String, String)> {
             let Some(blob) = read_memory(process, data_ptr as usize, data_len as usize) else {
                 continue;
             };
-            decode_wcdb_config_blob(&blob, &mut results);
+            for mask in &masks {
+                decode_wcdb_config_blob(&blob, mask, &mut results);
+            }
         }
     }
     results
 }
 
-fn decode_wcdb_config_blob(blob: &[u8], results: &mut Vec<(String, String)>) {
+fn load_config_xor_masks(process: HANDLE, pid: u32) -> Vec<[u8; 32]> {
+    let mut masks = vec![CONFIG_XOR_MASK];
+    let Some(module_base) = find_module_base(pid, "Weixin.dll") else {
+        return masks;
+    };
+    for rva in CONFIG_XOR_RVAS {
+        let Some(address) = module_base.checked_add(rva) else {
+            continue;
+        };
+        let Some(bytes) = read_memory(process, address, CONFIG_XOR_MASK.len()) else {
+            continue;
+        };
+        let Ok(mask) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+            continue;
+        };
+        append_unique_mask(&mut masks, mask);
+    }
+    masks
+}
+
+fn find_module_base(pid: u32, module_name: &str) -> Option<usize> {
+    let snapshot =
+        unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid).ok()? };
+    let mut entry = MODULEENTRY32 {
+        dwSize: std::mem::size_of::<MODULEENTRY32>() as u32,
+        ..Default::default()
+    };
+    let mut base = None;
+    unsafe {
+        if Module32First(snapshot, &mut entry).is_ok() {
+            loop {
+                let name = std::ffi::CStr::from_ptr(entry.szModule.as_ptr()).to_string_lossy();
+                if name.eq_ignore_ascii_case(module_name) {
+                    base = Some(entry.modBaseAddr as usize);
+                    break;
+                }
+                if Module32Next(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    base
+}
+
+fn append_unique_mask(masks: &mut Vec<[u8; 32]>, mask: [u8; 32]) {
+    if !masks.contains(&mask) {
+        masks.push(mask);
+    }
+}
+
+fn decode_wcdb_config_blob(blob: &[u8], mask: &[u8; 32], results: &mut Vec<(String, String)>) {
     let decoded: Vec<u8> = blob
         .iter()
         .enumerate()
-        .map(|(index, value)| value ^ CONFIG_XOR_MASK[index % CONFIG_XOR_MASK.len()])
+        .map(|(index, value)| value ^ mask[index % mask.len()])
         .collect();
     search_pattern(&decoded, results);
 }
@@ -389,7 +449,9 @@ fn search_pattern(buf: &[u8], results: &mut Vec<(String, String)>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_wcdb_config_blob, is_wechat_executable, CONFIG_XOR_MASK};
+    use super::{
+        append_unique_mask, decode_wcdb_config_blob, is_wechat_executable, CONFIG_XOR_MASK,
+    };
 
     #[test]
     fn accepts_new_and_legacy_wechat_process_names() {
@@ -408,8 +470,17 @@ mod tests {
             .collect();
         let mut pairs = Vec::new();
 
-        decode_wcdb_config_blob(&blob, &mut pairs);
+        decode_wcdb_config_blob(&blob, &CONFIG_XOR_MASK, &mut pairs);
 
         assert_eq!(pairs, vec![("a".repeat(64), "b".repeat(32))]);
+    }
+
+    #[test]
+    fn keeps_each_runtime_mask_once() {
+        let mut masks = vec![CONFIG_XOR_MASK];
+        append_unique_mask(&mut masks, CONFIG_XOR_MASK);
+        append_unique_mask(&mut masks, [0x5a; 32]);
+
+        assert_eq!(masks, vec![CONFIG_XOR_MASK, [0x5a; 32]]);
     }
 }
