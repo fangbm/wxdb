@@ -95,7 +95,7 @@ wxdb export <chat> --since YYYY-MM-DD --until YYYY-MM-DD --format json -o <path>
 
 ## 兼容性
 
-内存扫描器同时尝试新版 `Weixin.exe` 与旧版 `WeChat.exe`。对于 WeChat 4.10+
+内存扫描器同时尝试新版 `Weixin.exe` 与旧版 `WeChat.exe`。对于 WeChat 4.1.10+
 （已用 4.1.12.55 验证），它读取 WCDB 经 XOR 混淆的 `Config.Cipher` 对象：优先
 检查已知模块相对 mask 位置，再回退到内置 mask。旧版未混淆 raw-key 文本扫描仍会
 作为兼容路径保留。未知的客户端内存布局会清晰报为不兼容，而不会静默返回零密钥。
