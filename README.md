@@ -29,6 +29,22 @@ The executable is written to `target\release\wxdb.exe`. For SummaryAgent
 integration, set `[wxdb].executable` to its absolute path, or add its directory
 to `PATH`.
 
+## 发布 / Releases
+
+将 `Cargo.toml` 的版本更新为 `X.Y.Z` 后，推送同名的 `vX.Y.Z` tag 会自动运行
+Windows CI。检查通过后，GitHub Actions 会创建 Release、上传
+`wxdb-vX.Y.Z-windows-x64.zip`，并自动生成包含本次改动的 Release Notes。
+
+After updating the `Cargo.toml` version to `X.Y.Z`, push the matching `vX.Y.Z`
+tag to run the Windows CI automatically. After the checks pass, GitHub Actions
+creates a Release, uploads `wxdb-vX.Y.Z-windows-x64.zip`, and generates Release
+Notes containing the changes in that release.
+
+```powershell
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
 ## 快速开始 / Quick Start
 
 保持目标微信客户端已登录，然后检查发现到的账号并提取密钥：
