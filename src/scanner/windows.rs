@@ -7,8 +7,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows::Win32::System::Memory::{
     VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
-    PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOCACHE, PAGE_READWRITE, PAGE_WRITECOMBINE,
-    PAGE_WRITECOPY,
+    PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOCACHE, PAGE_READONLY, PAGE_READWRITE,
+    PAGE_WRITECOMBINE, PAGE_WRITECOPY,
 };
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 
@@ -16,6 +16,11 @@ use super::{collect_db_salts, KeyEntry};
 
 const HEX_PATTERN_LEN: usize = 96;
 const CHUNK_SIZE: usize = 2 * 1024 * 1024;
+const CONFIG_CIPHER_NAME: &[u8] = b"com.Tencent.WCDB.Config.Cipher";
+const CONFIG_XOR_MASK: [u8; 32] = [
+    0xd2, 0xc7, 0x44, 0x24, 0x58, 0x02, 0x00, 0x00, 0x00, 0x48, 0x89, 0x44, 0x24, 0x50, 0x48, 0x8b,
+    0x45, 0x00, 0x48, 0x84, 0x4c, 0x24, 0x48, 0x48, 0x89, 0x44, 0x25, 0x40, 0x48, 0x58, 0x4c, 0x24,
+];
 
 pub fn scan_keys(db_dir: &Path) -> Result<Vec<KeyEntry>> {
     let db_salts = collect_db_salts(db_dir);
@@ -33,7 +38,14 @@ pub fn scan_keys(db_dir: &Path) -> Result<Vec<KeyEntry>> {
                 continue;
             }
         };
-        raw_keys.extend(scan_memory(process));
+        for pair in scan_memory(process)
+            .into_iter()
+            .chain(scan_wcdb_config_keys(process))
+        {
+            if !raw_keys.contains(&pair) {
+                raw_keys.push(pair);
+            }
+        }
         unsafe {
             let _ = CloseHandle(process);
         }
@@ -118,6 +130,79 @@ fn is_wechat_executable(name: &str) -> bool {
     name.eq_ignore_ascii_case("Weixin.exe") || name.eq_ignore_ascii_case("WeChat.exe")
 }
 
+/// Extracts WeChat 4.10+ keys from WCDB's obfuscated Config.Cipher values.
+///
+/// The configuration map stores a `[pointer, length]` string key inside its
+/// node, with the cipher value reachable from the node's config pointer. The
+/// value is XOR-obfuscated with a fixed mask and decodes to SQLCipher's raw
+/// `x'<key><salt>'` syntax.
+fn scan_wcdb_config_keys(process: HANDLE) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    let names = find_bytes(process, CONFIG_CIPHER_NAME);
+    if names.is_empty() {
+        return results;
+    }
+
+    for name_addr in &names {
+        let mut pair = [0u8; 16];
+        pair[..8].copy_from_slice(&(*name_addr as u64).to_le_bytes());
+        pair[8..].copy_from_slice(&(CONFIG_CIPHER_NAME.len() as u64).to_le_bytes());
+        for string_ref_addr in find_bytes(process, &pair) {
+            let Some(node) = read_memory(process, string_ref_addr.saturating_sub(0x10), 0x50)
+            else {
+                continue;
+            };
+            let Some(node_name_ptr) = read_u64(&node, 0x10) else {
+                continue;
+            };
+            if !names.contains(&(node_name_ptr as usize))
+                || read_u64(&node, 0x18) != Some(CONFIG_CIPHER_NAME.len() as u64)
+            {
+                continue;
+            }
+            let Some(config_ptr) = read_u64(&node, 0x28).filter(|ptr| is_plausible_ptr(*ptr))
+            else {
+                continue;
+            };
+            let Some(value) = read_memory(process, config_ptr as usize + 0x88, 0x28) else {
+                continue;
+            };
+            let (Some(data_ptr), Some(data_len)) = (read_u64(&value, 0x8), read_u64(&value, 0x10))
+            else {
+                continue;
+            };
+            if !is_plausible_ptr(data_ptr) || !(99..=1024).contains(&data_len) {
+                continue;
+            }
+            let Some(blob) = read_memory(process, data_ptr as usize, data_len as usize) else {
+                continue;
+            };
+            decode_wcdb_config_blob(&blob, &mut results);
+        }
+    }
+    results
+}
+
+fn decode_wcdb_config_blob(blob: &[u8], results: &mut Vec<(String, String)>) {
+    let decoded: Vec<u8> = blob
+        .iter()
+        .enumerate()
+        .map(|(index, value)| value ^ CONFIG_XOR_MASK[index % CONFIG_XOR_MASK.len()])
+        .collect();
+    search_pattern(&decoded, results);
+}
+
+fn read_u64(buf: &[u8], offset: usize) -> Option<u64> {
+    buf.get(offset..offset + 8)?
+        .try_into()
+        .ok()
+        .map(u64::from_le_bytes)
+}
+
+fn is_plausible_ptr(ptr: u64) -> bool {
+    (0x1_0000..0x8000_0000_0000).contains(&ptr)
+}
+
 fn scan_memory(process: HANDLE) -> Vec<(String, String)> {
     let mut results = Vec::new();
     let mut addr: usize = 0;
@@ -151,6 +236,75 @@ fn scan_memory(process: HANDLE) -> Vec<(String, String)> {
     results
 }
 
+fn find_bytes(process: HANDLE, needle: &[u8]) -> Vec<usize> {
+    if needle.is_empty() || needle.len() > CHUNK_SIZE {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    let mut addr = 0usize;
+    loop {
+        let mut mbi = MEMORY_BASIC_INFORMATION::default();
+        let ret = unsafe {
+            VirtualQueryEx(
+                process,
+                Some(addr as *const _),
+                &mut mbi,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if ret == 0 {
+            break;
+        }
+        let base = mbi.BaseAddress as usize;
+        if mbi.State == MEM_COMMIT && is_readable_page(mbi.Protect.0) {
+            find_in_region(process, base, mbi.RegionSize, needle, &mut hits);
+        }
+        addr = base.saturating_add(mbi.RegionSize);
+        if addr == 0 {
+            break;
+        }
+    }
+    hits
+}
+
+fn find_in_region(process: HANDLE, base: usize, size: usize, needle: &[u8], hits: &mut Vec<usize>) {
+    let overlap = needle.len().saturating_sub(1);
+    let mut offset = 0usize;
+    while offset < size {
+        let chunk_size = CHUNK_SIZE.min(size - offset);
+        let addr = base + offset;
+        if let Some(buf) = read_memory(process, addr, chunk_size) {
+            let mut position = 0usize;
+            while let Some(relative) = buf[position..]
+                .windows(needle.len())
+                .position(|candidate| candidate == needle)
+            {
+                let index = position + relative;
+                hits.push(addr + index);
+                position = index + 1;
+            }
+        }
+        offset += if chunk_size > overlap {
+            chunk_size - overlap
+        } else {
+            chunk_size
+        };
+    }
+}
+
+fn is_readable_page(protect: u32) -> bool {
+    let base = protect & !(PAGE_GUARD.0 | PAGE_NOCACHE.0 | PAGE_WRITECOMBINE.0);
+    matches!(
+        base,
+        value
+            if value == PAGE_READONLY.0
+                || value == PAGE_READWRITE.0
+                || value == PAGE_WRITECOPY.0
+                || value == PAGE_EXECUTE_READWRITE.0
+                || value == PAGE_EXECUTE_WRITECOPY.0
+    )
+}
+
 fn is_writable_readable_page(protect: u32) -> bool {
     let base = protect & !(PAGE_GUARD.0 | PAGE_NOCACHE.0 | PAGE_WRITECOMBINE.0);
     matches!(
@@ -168,20 +322,7 @@ fn scan_region(process: HANDLE, base: usize, size: usize, results: &mut Vec<(Str
     while offset < size {
         let chunk_size = std::cmp::min(CHUNK_SIZE, size - offset);
         let addr = base + offset;
-        let mut buf = vec![0u8; chunk_size];
-        let mut bytes_read: usize = 0;
-        let ok = unsafe {
-            ReadProcessMemory(
-                process,
-                addr as *const _,
-                buf.as_mut_ptr() as *mut _,
-                chunk_size,
-                Some(&mut bytes_read),
-            )
-            .is_ok()
-        };
-        if ok && bytes_read > 0 {
-            buf.truncate(bytes_read);
+        if let Some(buf) = read_memory(process, addr, chunk_size) {
             search_pattern(&buf, results);
         }
         offset += if chunk_size > overlap {
@@ -190,6 +331,28 @@ fn scan_region(process: HANDLE, base: usize, size: usize, results: &mut Vec<(Str
             chunk_size
         };
     }
+}
+
+fn read_memory(process: HANDLE, addr: usize, len: usize) -> Option<Vec<u8>> {
+    if addr == 0 || len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; len];
+    let mut bytes_read = 0usize;
+    let ok = unsafe {
+        ReadProcessMemory(
+            process,
+            addr as *const _,
+            buf.as_mut_ptr() as *mut _,
+            len,
+            Some(&mut bytes_read),
+        )
+        .is_ok()
+    };
+    if !ok || bytes_read != len {
+        return None;
+    }
+    Some(buf)
 }
 
 fn search_pattern(buf: &[u8], results: &mut Vec<(String, String)>) {
@@ -226,12 +389,27 @@ fn search_pattern(buf: &[u8], results: &mut Vec<(String, String)>) {
 
 #[cfg(test)]
 mod tests {
-    use super::is_wechat_executable;
+    use super::{decode_wcdb_config_blob, is_wechat_executable, CONFIG_XOR_MASK};
 
     #[test]
     fn accepts_new_and_legacy_wechat_process_names() {
         assert!(is_wechat_executable("Weixin.exe"));
         assert!(is_wechat_executable("wechat.EXE"));
         assert!(!is_wechat_executable("WeChatApp.exe"));
+    }
+
+    #[test]
+    fn decodes_obfuscated_wcdb_raw_key_literal() {
+        let plain = format!("x'{}{}'", "a".repeat(64), "b".repeat(32));
+        let blob: Vec<u8> = plain
+            .bytes()
+            .enumerate()
+            .map(|(index, value)| value ^ CONFIG_XOR_MASK[index % CONFIG_XOR_MASK.len()])
+            .collect();
+        let mut pairs = Vec::new();
+
+        decode_wcdb_config_blob(&blob, &mut pairs);
+
+        assert_eq!(pairs, vec![("a".repeat(64), "b".repeat(32))]);
     }
 }

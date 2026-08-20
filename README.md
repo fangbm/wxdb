@@ -45,5 +45,14 @@ name. Use the identifier with `history` when names are duplicated or change.
 The keyring is stored as plaintext JSON at
 `%USERPROFILE%\.wx-summary-agent\wxdb\keys.json` by design. Treat that file
 and the decrypted cache as sensitive local data. The memory scanner attempts
-both current `Weixin.exe` and legacy `WeChat.exe`; a client whose in-memory key
-layout is unknown is reported as unsupported instead of silently succeeding.
+both current `Weixin.exe` and legacy `WeChat.exe`. For WeChat 4.10+ it also
+reads WCDB's XOR-obfuscated `Config.Cipher` objects (verified with 4.1.12.55);
+the older plaintext raw-key scan remains as a fallback. A client whose in-memory
+key layout is unknown is reported as unsupported instead of silently succeeding.
+
+The initial decryption cache can be close to the combined size of the selected
+message shards. Put it on a drive with sufficient free space when necessary:
+
+```powershell
+$env:WXDB_CACHE_DIR = 'D:\wxdb-cache'
+```
