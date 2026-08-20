@@ -31,18 +31,18 @@ to `PATH`.
 
 ## 发布 / Releases
 
-将 `Cargo.toml` 的版本更新为 `X.Y.Z` 后，推送同名的 `vX.Y.Z` tag 会自动运行
-Windows CI。检查通过后，GitHub Actions 会创建 Release、上传
+将 `Cargo.toml` 的版本更新为 `X.Y.Z` 并合并到 `main` 后，Windows CI 会自动
+运行。若 `vX.Y.Z` 尚未发布，GitHub Actions 会创建该 tag 和 Release、上传
 `wxdb-vX.Y.Z-windows-x64.zip`，并自动生成包含本次改动的 Release Notes。
 
-After updating the `Cargo.toml` version to `X.Y.Z`, push the matching `vX.Y.Z`
-tag to run the Windows CI automatically. After the checks pass, GitHub Actions
-creates a Release, uploads `wxdb-vX.Y.Z-windows-x64.zip`, and generates Release
-Notes containing the changes in that release.
+After updating the `Cargo.toml` version to `X.Y.Z` and merging it into `main`,
+the Windows CI runs automatically. If `vX.Y.Z` has not been released yet,
+GitHub Actions creates the tag and Release, uploads
+`wxdb-vX.Y.Z-windows-x64.zip`, and generates Release Notes containing the
+changes in that release.
 
 ```powershell
-git tag vX.Y.Z
-git push origin vX.Y.Z
+# Update Cargo.toml's package version, commit it, and merge it into main.
 ```
 
 ## 快速开始 / Quick Start
