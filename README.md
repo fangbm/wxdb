@@ -29,6 +29,22 @@ The executable is written to `target\release\wxdb.exe`. For SummaryAgent
 integration, set `[wxdb].executable` to its absolute path, or add its directory
 to `PATH`.
 
+## 发布 / Releases
+
+将 `Cargo.toml` 的版本更新为 `X.Y.Z` 后，推送同名的 `vX.Y.Z` tag 会自动运行
+Windows CI。检查通过后，GitHub Actions 会创建 Release、上传
+`wxdb-vX.Y.Z-windows-x64.zip`，并自动生成包含本次改动的 Release Notes。
+
+After updating the `Cargo.toml` version to `X.Y.Z`, push the matching `vX.Y.Z`
+tag to run the Windows CI automatically. After the checks pass, GitHub Actions
+creates a Release, uploads `wxdb-vX.Y.Z-windows-x64.zip`, and generates Release
+Notes containing the changes in that release.
+
+```powershell
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
 ## 快速开始 / Quick Start
 
 保持目标微信客户端已登录，然后检查发现到的账号并提取密钥：
@@ -63,6 +79,52 @@ wxdb export '群显示名' --since 2026-08-01 --output .\history.json
 `contacts` prints each group's display name and stable `@chatroom` identifier.
 Use that identifier with `history` when names are duplicated or change.
 
+## SummaryAgent4GroupChat 集成 / Integration
+
+SummaryAgent invokes `wxdb` as an external process. It does not need to copy an
+executable into the application directory. Configure an absolute path so the
+installed application does not depend on the interactive shell's `PATH`:
+
+```toml
+[wxdb]
+executable = "D:\\codex\\wxdb\\target\\release\\wxdb.exe"
+timeout_seconds = 20
+history_query_timeout_seconds = 60
+cache_dir = "D:\\wxdb-cache"
+# When a group name changes or is ambiguous, map the wx4py display name to the
+# stable identifier returned by `wxdb contacts --groups --json`.
+group_name_map = { "My Group" = "123456@chatroom" }
+```
+
+SummaryAgent supplies `WXDB_CACHE_DIR` from `cache_dir` and, when configured in
+the GUI, `WXDB_DB_DIR` to the child process. `WXDB_DB_DIR` selects only that
+account's `db_storage` directory; it is useful when multiple WeChat accounts
+exist on the machine.
+
+The integration calls the following stable JSON interface. Compatible external
+providers should accept the same flags and return an object containing a
+`messages` array.
+
+```text
+wxdb history <chat> --since YYYY-MM-DD --until YYYY-MM-DD --type all --json -n <page-size>
+  [--before-local-id <local-id>] [--media-decode-limit <count>]
+```
+
+`--type all` is intentional: SummaryAgent needs text, image, and voice rows so
+that optional image description and voice transcription can be inserted at the
+original message positions. `--before-local-id` is used for cursor pagination
+when a range spans more than one page. Set `--media-decode-limit 0` to avoid
+media decoding for command polling; omit it for no decoding limit, or provide a
+positive bound for a summary request.
+
+If a provider cannot complete the primary `history` call, SummaryAgent may use
+the file fallback below. `export` therefore remains part of the compatibility
+contract:
+
+```text
+wxdb export <chat> --since YYYY-MM-DD --until YYYY-MM-DD --format json -o <path> -n <limit>
+```
+
 ## 命令 / Commands
 
 | 命令 / Command | 说明 / Description |
@@ -70,7 +132,7 @@ Use that identifier with `history` when names are duplicated or change.
 | `wxdb doctor [--json]` | 显示发现到的数据库、密钥覆盖情况和缓存位置。 Shows discovered databases, key coverage, and cache locations. |
 | `wxdb init` | 扫描正在运行的微信进程并刷新本地密钥缓存。 Scans running WeChat processes and refreshes the local key cache. |
 | `wxdb contacts [--groups] [--search <text>]` | 列出联系人或群聊；`--groups` 仅列群聊。 Lists contacts or groups; `--groups` limits results to groups. |
-| `wxdb history <chat>` | 查询聊天记录，支持 `--since`、`--until`、`--type`、`--limit` 和 `--json`。 Queries history; supports `--since`, `--until`, `--type`, `--limit`, and `--json`. |
+| `wxdb history <chat>` | 查询聊天记录，支持 `--since`、`--until`、`--type all`、`--limit`、`--json`、`--before-local-id` 和 `--media-decode-limit`。 Queries history with filtering, JSON output, cursor pagination, and a media decoding budget. |
 | `wxdb export <chat> --output <path>` | 将聊天记录导出为 JSON。 Exports history as JSON. |
 
 ## 兼容性 / Compatibility
