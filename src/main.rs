@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{Local, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use wxdb::{doctor, query_history, refresh_keys, HistoryQuery};
+use wxdb::{doctor, list_contacts, query_history, refresh_keys, ContactQuery, HistoryQuery};
 
 #[derive(Parser)]
 #[command(name = "wxdb")]
@@ -16,6 +16,16 @@ struct Cli {
 enum Command {
     Init,
     Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    Contacts {
+        #[arg(short = 'n', long = "limit", default_value_t = 100)]
+        limit: usize,
+        #[arg(long)]
+        search: Option<String>,
+        #[arg(long)]
+        groups: bool,
         #[arg(long)]
         json: bool,
     },
@@ -73,6 +83,30 @@ fn main() -> Result<()> {
                         store.message_shards,
                         store.known_keys,
                         store.missing_message_keys.len()
+                    );
+                }
+            }
+        }
+        Command::Contacts {
+            limit,
+            search,
+            groups,
+            json,
+        } => {
+            let result = list_contacts(ContactQuery {
+                search,
+                limit,
+                groups_only: groups,
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                for contact in result.contacts {
+                    println!(
+                        "{}\t{}\t{}",
+                        if contact.is_group { "group" } else { "contact" },
+                        contact.display,
+                        contact.username
                     );
                 }
             }

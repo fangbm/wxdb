@@ -45,6 +45,11 @@ pub fn scan_keys(db_dir: &Path) -> Result<Vec<KeyEntry>> {
             open_errors.join("; ")
         );
     }
+    if raw_keys.is_empty() {
+        anyhow::bail!(
+            "未在微信进程内存中找到数据库密钥模式；当前客户端版本可能尚不兼容，请保持微信登录后重试"
+        );
+    }
 
     let mut entries = Vec::new();
     for (key_hex, salt_hex) in &raw_keys {
@@ -58,6 +63,12 @@ pub fn scan_keys(db_dir: &Path) -> Result<Vec<KeyEntry>> {
                 break;
             }
         }
+    }
+    if entries.is_empty() {
+        anyhow::bail!(
+            "在微信进程内存中找到了 {} 个候选密钥模式，但没有与目标数据库盐匹配的密钥；请确认该账号对应的微信客户端仍在运行",
+            raw_keys.len()
+        );
     }
     Ok(entries)
 }
@@ -91,7 +102,7 @@ fn find_wechat_pids() -> Vec<u32> {
         }
         loop {
             let name = std::ffi::CStr::from_ptr(entry.szExeFile.as_ptr()).to_string_lossy();
-            if name.eq_ignore_ascii_case("Weixin.exe") {
+            if is_wechat_executable(&name) {
                 pids.push(entry.th32ProcessID);
             }
             if Process32Next(snap, &mut entry).is_err() {
@@ -101,6 +112,10 @@ fn find_wechat_pids() -> Vec<u32> {
         let _ = CloseHandle(snap);
     }
     pids
+}
+
+fn is_wechat_executable(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Weixin.exe") || name.eq_ignore_ascii_case("WeChat.exe")
 }
 
 fn scan_memory(process: HANDLE) -> Vec<(String, String)> {
@@ -206,5 +221,17 @@ fn search_pattern(buf: &[u8], results: &mut Vec<(String, String)>) {
             results.push((key_hex, salt_hex));
         }
         idx += total;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_wechat_executable;
+
+    #[test]
+    fn accepts_new_and_legacy_wechat_process_names() {
+        assert!(is_wechat_executable("Weixin.exe"));
+        assert!(is_wechat_executable("wechat.EXE"));
+        assert!(!is_wechat_executable("WeChatApp.exe"));
     }
 }

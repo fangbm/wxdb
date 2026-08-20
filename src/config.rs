@@ -73,30 +73,37 @@ impl RuntimeConfig {
             })
             .unwrap_or_else(|| app_dir.join("keys.json"));
 
-        let mut db_dirs = BTreeSet::new();
+        let mut configured_db_dirs = BTreeSet::new();
         let explicit_db_dir = std::env::var_os("WXDB_DB_DIR").is_some()
             || file_config
                 .as_ref()
                 .is_some_and(|config| config.db_dir.is_some() || !config.db_dirs.is_empty());
         for path in env_paths("WXDB_DB_DIR") {
-            add_db_dir_candidate(&mut db_dirs, path);
+            add_db_dir_candidate(&mut configured_db_dirs, path);
         }
         if let Some(config) = &file_config {
             if let Some(path) = &config.db_dir {
-                add_db_dir_candidate(&mut db_dirs, path.clone());
+                add_db_dir_candidate(&mut configured_db_dirs, path.clone());
             }
             for path in &config.db_dirs {
-                add_db_dir_candidate(&mut db_dirs, path.clone());
+                add_db_dir_candidate(&mut configured_db_dirs, path.clone());
             }
         }
-        if let Some((db_dir, _keys_file)) = legacy_config(&legacy_wx_cli_dir) {
-            add_db_dir_candidate(&mut db_dirs, db_dir.clone());
-            if let Some(parent) = db_dir.parent().and_then(Path::parent) {
-                discover_under_xwechat_root(parent, &mut db_dirs);
+
+        // An explicit path is an account-selection mechanism, not merely another
+        // discovery hint. In particular, an Agent must be able to pin a single
+        // account even when other accounts are found under the default roots.
+        let mut db_dirs = configured_db_dirs;
+        if !explicit_db_dir {
+            if let Some((db_dir, _keys_file)) = legacy_config(&legacy_wx_cli_dir) {
+                add_db_dir_candidate(&mut db_dirs, db_dir.clone());
+                if let Some(parent) = db_dir.parent().and_then(Path::parent) {
+                    discover_under_xwechat_root(parent, &mut db_dirs);
+                }
             }
-        }
-        for root in default_xwechat_roots() {
-            discover_under_xwechat_root(&root, &mut db_dirs);
+            for root in default_xwechat_roots() {
+                discover_under_xwechat_root(&root, &mut db_dirs);
+            }
         }
 
         let mut db_dirs: Vec<PathBuf> =

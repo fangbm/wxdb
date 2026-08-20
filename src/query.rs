@@ -24,6 +24,27 @@ pub struct HistoryQuery {
     pub media_decode_limit: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ContactQuery {
+    pub search: Option<String>,
+    pub limit: usize,
+    pub groups_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Contact {
+    pub username: String,
+    pub display: String,
+    pub is_group: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContactResult {
+    pub count: usize,
+    pub contacts: Vec<Contact>,
+    pub db_dir: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
     pub timestamp: i64,
@@ -95,6 +116,53 @@ struct MessageShard {
 pub fn query_history(query: HistoryQuery) -> Result<HistoryResult> {
     let config = RuntimeConfig::load();
     query_history_with_config(&config, query)
+}
+
+pub fn list_contacts(query: ContactQuery) -> Result<ContactResult> {
+    let config = RuntimeConfig::load();
+    list_contacts_with_config(&config, query)
+}
+
+pub fn list_contacts_with_config(
+    config: &RuntimeConfig,
+    query: ContactQuery,
+) -> Result<ContactResult> {
+    if config.db_dirs.is_empty() {
+        anyhow::bail!(
+            "未找到 WeChat db_storage 目录；可设置 WXDB_DB_DIR 或运行 wxdb doctor 查看候选"
+        );
+    }
+
+    let mut result = None;
+    let mut successful_stores = 0usize;
+    let mut errors = Vec::new();
+    for db_dir in &config.db_dirs {
+        match list_contacts_in_store(config, db_dir, &query) {
+            Ok(contacts) => {
+                successful_stores += 1;
+                result = Some(ContactResult {
+                    count: contacts.len(),
+                    contacts,
+                    db_dir: db_dir.clone(),
+                });
+            }
+            Err(error) => errors.push(format!("{}: {error:#}", db_dir.display())),
+        }
+    }
+    if !config.explicit_db_dir && successful_stores > 1 {
+        anyhow::bail!(
+            "微信数据库存在多个可读账号目录，无法安全混合联系人；请通过 WXDB_DB_DIR 或 config.json 选择一个账号目录"
+        );
+    }
+    result.ok_or_else(|| {
+        anyhow::anyhow!(
+            "无法读取任何微信账号的联系人数据库{}",
+            errors
+                .first()
+                .map(|error| format!("；主要错误: {error}"))
+                .unwrap_or_default()
+        )
+    })
 }
 
 pub fn query_history_with_config(
@@ -455,6 +523,54 @@ fn query_history_in_store(
             warnings,
         },
     })
+}
+
+fn list_contacts_in_store(
+    config: &RuntimeConfig,
+    db_dir: &Path,
+    query: &ContactQuery,
+) -> Result<Vec<Contact>> {
+    let keys = keyring::ensure_keys_for_db_dir(config, db_dir)?;
+    if keys.is_empty() {
+        anyhow::bail!("没有可用数据库密钥；请确认微信正在运行，必要时用管理员权限执行 wxdb init");
+    }
+    let mut cache = DbCache::new(
+        db_dir.to_path_buf(),
+        config.cache_dir_for(db_dir),
+        config.mtime_file_for(db_dir),
+        keys,
+    )?;
+    let names = load_names(&mut cache)?;
+    let search = query.search.as_deref().map(str::to_lowercase);
+    let mut contacts: Vec<Contact> = names
+        .map
+        .into_iter()
+        .filter_map(|(username, display)| {
+            let is_group = username.contains("@chatroom");
+            if query.groups_only && !is_group {
+                return None;
+            }
+            if search.as_ref().is_some_and(|search| {
+                !username.to_lowercase().contains(search)
+                    && !display.to_lowercase().contains(search)
+            }) {
+                return None;
+            }
+            Some(Contact {
+                username,
+                display,
+                is_group,
+            })
+        })
+        .collect();
+    contacts.sort_by(|left, right| {
+        left.display
+            .to_lowercase()
+            .cmp(&right.display.to_lowercase())
+            .then_with(|| left.username.cmp(&right.username))
+    });
+    contacts.truncate(query.limit);
+    Ok(contacts)
 }
 
 fn load_names(cache: &mut DbCache) -> Result<Names> {

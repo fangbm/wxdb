@@ -13,5 +13,6 @@ pub use media::{
     detect_video_format, DecodedMedia,
 };
 pub use query::{
-    query_history, query_history_with_config, HistoryMessage, HistoryQuery, HistoryResult,
+    list_contacts, list_contacts_with_config, query_history, query_history_with_config, Contact,
+    ContactQuery, ContactResult, HistoryMessage, HistoryQuery, HistoryResult,
 };
