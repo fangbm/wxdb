@@ -263,7 +263,7 @@ fn aes128_ecb_decrypt_pkcs7(key: &[u8; 16], cipher: &[u8]) -> Result<Vec<u8>> {
     }
     let aes = aes::Aes128::new(key.into());
     let mut out = Vec::with_capacity(cipher.len());
-    for chunk in cipher.chunks_exact(16) {
+    for chunk in cipher.as_chunks::<16>().0 {
         let mut block = GenericArray::clone_from_slice(chunk);
         aes.decrypt_block(&mut block);
         out.extend_from_slice(&block);
@@ -567,7 +567,7 @@ fn parse_hex_16(value: &str) -> Option<[u8; 16]> {
         return None;
     }
     let mut out = [0u8; 16];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let text = std::str::from_utf8(chunk).ok()?;
         out[index] = u8::from_str_radix(text, 16).ok()?;
     }

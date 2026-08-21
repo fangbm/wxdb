@@ -44,7 +44,12 @@ fn aes_cbc_decrypt(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Result<Vec<u8>
     if data.is_empty() || !data.len().is_multiple_of(16) {
         bail!("密文长度不是 AES 块大小的倍数: {}", data.len());
     }
-    let mut blocks: Vec<Block> = data.chunks_exact(16).map(Block::clone_from_slice).collect();
+    let mut blocks: Vec<Block> = data
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|block| Block::clone_from_slice(block))
+        .collect();
     Aes256CbcDec::new(key.into(), iv.into()).decrypt_blocks_mut(&mut blocks);
     Ok(blocks
         .iter()
@@ -96,7 +101,7 @@ pub(crate) fn hex_to_32bytes(hex: &str) -> Result<[u8; 32]> {
         bail!("密钥长度应为 64 个 hex 字符，实际 {}", hex.len());
     }
     let mut out = [0u8; 32];
-    for (idx, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+    for (idx, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let s = std::str::from_utf8(chunk)?;
         out[idx] = u8::from_str_radix(s, 16)?;
     }
