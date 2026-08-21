@@ -3,7 +3,7 @@ name = "wxdb"
 edition = "2021"
 license = "UNLICENSED"
 publish = false
-version = "0.1.0"
+version = "0.1.1"
 
 [[bin]]
 name = "wxdb"

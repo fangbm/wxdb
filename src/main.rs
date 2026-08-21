@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use wxdb::{doctor, list_contacts, query_history, refresh_keys, ContactQuery, HistoryQuery};
 
 #[derive(Parser)]
-#[command(name = "wxdb")]
+#[command(name = "wxdb", version)]
 #[command(about = "WeChat database history CLI with memory key scan and mtime cache")]
 struct Cli {
     #[command(subcommand)]
@@ -228,5 +228,24 @@ fn history_type_filter(value: &str) -> Vec<String> {
         "" | "all" | "*" => Vec::new(),
         "txt" => vec!["text".to_string()],
         other => vec![other.to_string()],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::{error::ErrorKind, Parser};
+
+    #[test]
+    fn exposes_package_version() {
+        let error = match Cli::try_parse_from(["wxdb", "--version"]) {
+            Err(error) => error,
+            Ok(_) => panic!("--version must stop parsing and display the package version"),
+        };
+
+        assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+        assert!(error
+            .to_string()
+            .contains(&format!("wxdb {}", env!("CARGO_PKG_VERSION"))));
     }
 }
