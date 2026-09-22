@@ -1021,7 +1021,10 @@ fn sender_filter_matches(
     names_map: &HashMap<String, String>,
     group_nicknames: &HashMap<String, String>,
 ) -> bool {
-    let Some(filter) = filter.map(normalize_sender_filter).filter(|value| !value.is_empty()) else {
+    let Some(filter) = filter
+        .map(normalize_sender_filter)
+        .filter(|value| !value.is_empty())
+    else {
         return true;
     };
     [
