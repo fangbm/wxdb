@@ -76,12 +76,14 @@ providers should accept the same flags and return an object containing a
 
 ```text
 wxdb history <chat> --since YYYY-MM-DD --until YYYY-MM-DD --type all --json -n <page-size>
-  [--before-local-id <local-id>] [--media-decode-limit <count>]
+  [--sender <username-or-display>] [--before-local-id <local-id>] [--media-decode-limit <count>]
 ```
 
 `--type all` is intentional: SummaryAgent needs text, image, and voice rows so
 that optional image description and voice transcription can be inserted at the
-original message positions. `--before-local-id` is used for cursor pagination
+original message positions. `--sender` performs an exact, case-insensitive
+match against the sender username, contact display name, or group nickname
+before media decoding consumes its budget. `--before-local-id` is used for cursor pagination
 when a range spans more than one page. Set `--media-decode-limit 0` to avoid
 media decoding for command polling; omit it for no decoding limit, or provide a
 positive bound for a summary request.

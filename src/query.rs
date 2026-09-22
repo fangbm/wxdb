@@ -21,6 +21,7 @@ pub struct HistoryQuery {
     pub limit: usize,
     pub text_only: bool,
     pub msg_types: Vec<String>,
+    pub sender_filter: Option<String>,
     pub media_decode_limit: Option<usize>,
 }
 
@@ -189,6 +190,7 @@ pub fn query_history_with_config(
         limit = query.limit,
         text_only = query.text_only,
         msg_types = ?query.msg_types,
+        sender_filtered = query.sender_filter.as_deref().is_some_and(|value| !value.trim().is_empty()),
         media_decode_limit = ?query.media_decode_limit,
         db_dirs = config.db_dirs.len(),
         "wxdb query started"
@@ -464,6 +466,7 @@ fn query_history_in_store(
             query.before_local_id,
             query.text_only,
             &query.msg_types,
+            query.sender_filter.as_deref(),
             query.limit,
             &mut media_decode_remaining,
             &mut image_resolver,
@@ -730,10 +733,17 @@ fn query_messages(
     before_local_id: Option<i64>,
     text_only: bool,
     msg_types: &[String],
+    sender_filter: Option<&str>,
     limit: usize,
     media_decode_remaining: &mut Option<usize>,
     image_resolver: &mut ImageResolveContext,
 ) -> Result<Vec<HistoryMessage>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let sender_filter = sender_filter
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let started = Instant::now();
     let budget_before = *media_decode_remaining;
     tracing::debug!(
@@ -744,6 +754,7 @@ fn query_messages(
         until = ?until,
         text_only,
         msg_types = ?msg_types,
+        sender_filtered = sender_filter.is_some(),
         limit,
         media_decode_remaining = ?media_decode_remaining,
         "wxdb shard query started"
@@ -780,13 +791,22 @@ fn query_messages(
     } else {
         format!("WHERE {}", clauses.join(" AND "))
     };
-    let sql = format!(
-        "SELECT local_id, local_type, create_time, real_sender_id,
-                message_content, WCDB_CT_message_content, packed_info_data
-         FROM [{}] {} ORDER BY create_time DESC, local_id DESC LIMIT ?",
-        table, where_clause
-    );
-    params.push(Box::new(limit as i64));
+    let sql = if sender_filter.is_some() {
+        format!(
+            "SELECT local_id, local_type, create_time, real_sender_id,
+                    message_content, WCDB_CT_message_content, packed_info_data
+             FROM [{}] {} ORDER BY create_time DESC, local_id DESC",
+            table, where_clause
+        )
+    } else {
+        params.push(Box::new(limit as i64));
+        format!(
+            "SELECT local_id, local_type, create_time, real_sender_id,
+                    message_content, WCDB_CT_message_content, packed_info_data
+             FROM [{}] {} ORDER BY create_time DESC, local_id DESC LIMIT ?",
+            table, where_clause
+        )
+    };
     let params_ref: Vec<&dyn rusqlite::types::ToSql> =
         params.iter().map(|param| param.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
@@ -826,6 +846,16 @@ fn query_messages(
             chat_username,
             &id2u,
         );
+        if !sender_filter_matches(
+            sender_filter,
+            &sender_username,
+            &sender,
+            names_map,
+            group_nicknames,
+        ) {
+            stats.sender_filtered += 1;
+            continue;
+        }
         let content = format_content(local_id, local_type, &raw_content, is_group);
         if content.trim().is_empty() {
             stats.empty_content += 1;
@@ -923,6 +953,9 @@ fn query_messages(
             media_decoder: media.as_ref().and_then(|media| media.decoder.clone()),
             media_decode_error: media.as_ref().and_then(|media| media.decode_error.clone()),
         });
+        if messages.len() >= limit {
+            break;
+        }
     }
     tracing::debug!(
         shard = %shard_rel_key,
@@ -931,6 +964,7 @@ fn query_messages(
         rows_seen = stats.rows_seen,
         row_errors = stats.row_errors,
         empty_content = stats.empty_content,
+        sender_filtered = stats.sender_filtered,
         messages = stats.messages_kept,
         image_messages = stats.image_messages,
         voice_messages = stats.voice_messages,
@@ -954,6 +988,7 @@ struct QueryMessageStats {
     rows_seen: usize,
     row_errors: usize,
     empty_content: usize,
+    sender_filtered: usize,
     messages_kept: usize,
     image_messages: usize,
     voice_messages: usize,
@@ -973,6 +1008,34 @@ fn record_media_decode_stats(stats: &mut QueryMessageStats, media: &Option<Image
         Some(_) => stats.media_decode_unresolved += 1,
         None => stats.media_decode_no_candidates += 1,
     }
+}
+
+fn normalize_sender_filter(value: &str) -> String {
+    value.trim().trim_start_matches('@').to_lowercase()
+}
+
+fn sender_filter_matches(
+    filter: Option<&str>,
+    sender_username: &str,
+    sender: &str,
+    names_map: &HashMap<String, String>,
+    group_nicknames: &HashMap<String, String>,
+) -> bool {
+    let Some(filter) = filter
+        .map(normalize_sender_filter)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+    [
+        Some(sender_username),
+        Some(sender),
+        names_map.get(sender_username).map(String::as_str),
+        group_nicknames.get(sender_username).map(String::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| normalize_sender_filter(value) == filter)
 }
 
 fn consume_media_decode_budget(media_decode_remaining: &mut Option<usize>) -> bool {
@@ -2271,6 +2334,41 @@ mod tests {
         assert!(media.decode_error.is_some());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sender_filter_matches_username_contact_or_group_nickname() {
+        let names = HashMap::from([("wxid_alice".to_string(), "Alice".to_string())]);
+        let nicknames = HashMap::from([("wxid_alice".to_string(), "Alice Smith".to_string())]);
+
+        assert!(sender_filter_matches(
+            Some("@wxid_alice"),
+            "wxid_alice",
+            "Alice Smith",
+            &names,
+            &nicknames,
+        ));
+        assert!(sender_filter_matches(
+            Some("alice"),
+            "wxid_alice",
+            "Alice Smith",
+            &names,
+            &nicknames,
+        ));
+        assert!(sender_filter_matches(
+            Some("Alice Smith"),
+            "wxid_alice",
+            "Alice Smith",
+            &names,
+            &nicknames,
+        ));
+        assert!(!sender_filter_matches(
+            Some("Bob"),
+            "wxid_alice",
+            "Alice Smith",
+            &names,
+            &nicknames,
+        ));
     }
 
     #[test]

@@ -40,6 +40,8 @@ enum Command {
         #[arg(long = "type")]
         msg_type: Option<String>,
         #[arg(long)]
+        sender: Option<String>,
+        #[arg(long)]
         json: bool,
         #[arg(long)]
         media_decode_limit: Option<usize>,
@@ -117,6 +119,7 @@ fn main() -> Result<()> {
             since,
             until,
             msg_type,
+            sender,
             json,
             media_decode_limit,
             before_local_id,
@@ -132,6 +135,7 @@ fn main() -> Result<()> {
                     .as_deref()
                     .map(history_type_filter)
                     .unwrap_or_default(),
+                sender_filter: sender,
                 media_decode_limit,
             })?;
             if json {
@@ -170,6 +174,7 @@ fn main() -> Result<()> {
                 limit,
                 text_only: false,
                 msg_types: Vec::new(),
+                sender_filter: None,
                 media_decode_limit: None,
             })?;
             if let Some(parent) = output.parent() {
@@ -233,8 +238,26 @@ fn history_type_filter(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, Command};
     use clap::{error::ErrorKind, Parser};
+
+    #[test]
+    fn history_accepts_sender_filter() {
+        let cli = Cli::try_parse_from([
+            "wxdb",
+            "history",
+            "group",
+            "--sender",
+            "Alice Smith",
+            "--json",
+        ])
+        .unwrap();
+
+        let Command::History { sender, .. } = cli.command else {
+            panic!("expected history command");
+        };
+        assert_eq!(sender.as_deref(), Some("Alice Smith"));
+    }
 
     #[test]
     fn exposes_package_version() {

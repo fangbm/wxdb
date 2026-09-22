@@ -68,11 +68,12 @@ SummaryAgent 会从 `cache_dir` 向子进程传入 `WXDB_CACHE_DIR`；在 GUI �
 
 ```text
 wxdb history <chat> --since YYYY-MM-DD --until YYYY-MM-DD --type all --json -n <page-size>
-  [--before-local-id <local-id>] [--media-decode-limit <count>]
+  [--sender <username-or-display>] [--before-local-id <local-id>] [--media-decode-limit <count>]
 ```
 
 `--type all` 是有意设计：SummaryAgent 需要文本、图片与语音记录，才能将可选的
-图片描述和语音转写插回原始消息位置。`--before-local-id` 用于跨页范围查询的游标
+图片描述和语音转写插回原始消息位置。`--sender` 会在媒体解码预算扣减前按发送者
+username、联系人显示名或群昵称做精确（忽略大小写）过滤，供单成员总结使用。`--before-local-id` 用于跨页范围查询的游标
 分页。命令轮询时设 `--media-decode-limit 0` 可避免媒体解码；省略该参数表示不设
 解码上限，正数则为单次总结请求设置预算。
 
